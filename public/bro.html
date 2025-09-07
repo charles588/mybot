@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Auto Trader Monitor</title>
+
+  <!-- External Libraries -->
+  <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-chart-financial@0.1.0"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@1.1.0/dist/chartjs-plugin-annotation.min.js"></script>
+
+  <!-- Styles -->
+  <style>
+    body {
+      background: #0d1117;
+      color: #c9d1d9;
+      font-family: 'Inter', sans-serif;
+      margin: 0;
+      padding: 0;
+    }
+    .dashboard {
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      gap: 20px;
+      padding: 30px;
+    }
+    .card {
+      background: #161b22;
+      padding: 20px;
+      border-radius: 12px;
+      box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+    }
+    .card h2 {
+      margin-top: 0;
+      font-weight: 600;
+    }
+    .control-panel button {
+      background: #238636;
+      color: white;
+      padding: 10px 20px;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      margin-top: 10px;
+      transition: 0.3s;
+    }
+    .control-panel button:hover {
+      background: #2ea043;
+    }
+    .log {
+      height: 300px;
+      overflow-y: auto;
+      background: #0d1117;
+      padding: 10px;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div class="dashboard">
+    <div class="card">
+      <h2>Auto Trader Monitor</h2>
+      <div id="pnl" style="font-family: monospace; margin-top: 20px;"></div>
+
+        <p>Active Pair: <span id="activePair">-</span></p>
+  <p>Last Signal: <span id="lastSignal">-</span></p>
+  <p>Current Position: <span id="currentPosition">None</span></p>
+  <p>Profit/Loss: <span id="pnl">0</span> USDT</p> 
+      <canvas id="tradeChart"></canvas>
+      <canvas id="rsiChart" style="margin-top: 20px;"></canvas>
+    </div>
+    <div class="card control-panel">
+      <h2>Auto Trading Control</h2>
+      <label for="pairSelect">Select Pair:</label>
+      <select id="pairSelect">
+        <option value="BTCUSDT">BTC/USDT</option>
+        <option value="ETHUSDT">ETH/USDT</option>
+        <option value="BNBUSDT">BNB/USDT</option>
+        <option value="SOLUSDT">SOL/USDT</option>
+        <option value="XRPUSDT">XRP/USDT</option>
+      </select><br><br>
+      <label for="qtyInput">Quantity:</label>
+      <input type="number" id="qtyInput" step="0.0001" value="0.0001"/><br><br>
+      <label for="tpInput">Take Profit (%):</label>
+      <input type="number" id="tpInput" step="0.1" value="1.5"/><br><br>
+      <label for="slInput">Stop Loss (%):</label>
+      <input type="number" id="slInput" step="0.1" value="0.5"/><br><br>
+      <label for="timeframeSelect">Select Timeframe:</label>
+      <select id="timeframeSelect">
+        <option value="60000">1 Minute</option>
+        <option value="300000" selected>5 Minutes</option>
+        <option value="900000">15 Minutes</option>
+      </select>
+      <div id="logBox" style="height:250px;overflow-y:auto;
+     background:black;color:white;font-family:monospace;
+     padding:10px;border-radius:6px"></div>
+      <p>Status: <span id="status">Stopped</span></p>
+      <button onclick="toggleTrading()">Start Auto Trading</button>
+      <h3>Trade Log:</h3>
+      <div class="log" id="tradeLog"></div>
+    </div>
+  </div>
+  <div style="padding: 15px; background: #161b22; color: #8b949e; text-align: center; font-size: 12px; border-top: 1px solid #30363d;">
+    <strong>Disclaimer:</strong> Trading cryptocurrency carries risk. Use at your own discretion.
+  </div>
+  <script>
+async function fetchLogs() {
+  try {
+    const res = await axios.get("/api/logs");
+    const logs = res.data.logs || [];
+
+    const logBox = document.getElementById("logBox");
+    logBox.innerHTML = logs
+      .map(l => {
+        if (l.includes("BUY")) return `<div style="color:lime">${l}</div>`;
+        if (l.includes("SELL")) return `<div style="color:red">${l}</div>`;
+        if (l.includes("Closing")) return `<div style="color:orange">${l}</div>`;
+        if (l.includes("Take Profit")) return `<div style="color:cyan">${l}</div>`;
+        if (l.includes("Stop Loss")) return `<div style="color:magenta">${l}</div>`;
+        if (l.includes("skipping")) return `<div style="color:gray">${l}</div>`;
+        return `<div>${l}</div>`;
+      })
+      .join("");
+
+    logBox.scrollTop = logBox.scrollHeight;
+  } catch (err) {
+    console.error("Error fetching logs:", err.message);
+  }
+}
+
+setInterval(fetchLogs, 2000);
+</script>
+
+  <script>
+    const BASE_API_URL = 'http://localhost:4000';
+    let autoTrading = false, tradingInterval = null, activePosition = null, failCount = 0;
+    const maxCandles = 50;
+    let candlestickChart, rsiChart;
+
+    function initCharts() {
+      const ctx1 = document.getElementById('tradeChart').getContext('2d');
+      const ctx2 = document.getElementById('rsiChart').getContext('2d');
+
+      candlestickChart = new Chart(ctx1, {
+        type: 'candlestick',
+        data: { datasets: [{ label: 'Price', data: [], color: { up: '#2ea043', down: '#f85149', unchanged: '#c9d1d9' } }] },
+        options: {
+          plugins: { legend: { labels: { color: '#c9d1d9' } } },
+          scales: {
+            x: { type: 'time', time: { unit: 'minute' }, ticks: { color: '#8b949e' } },
+            y: { ticks: { color: '#8b949e' } }
+          }
+        }
+      });
+
+      rsiChart = new Chart(ctx2, {
+        type: 'line',
+        data: { labels: [], datasets: [{ label: 'RSI', data: [], borderColor: '#60A5FA', pointRadius: 0, borderWidth: 2 }] },
+        options: {
+          plugins: {
+            legend: { labels: { color: '#c9d1d9' } },
+            annotation: {
+              annotations: {
+                overboughtLine: { type: 'line', yMin: 70, yMax: 70, borderColor: 'green', borderWidth: 1, label: { content: 'Overbought (70)', enabled: true, position: 'end', color: 'green' } },
+                oversoldLine: { type: 'line', yMin: 30, yMax: 30, borderColor: 'red', borderWidth: 1, label: { content: 'Oversold (30)', enabled: true, position: 'end', color: 'red' } }
+              }
+            }
+          },
+          scales: { x: { display: false }, y: { min: 0, max: 100, ticks: { color: '#38BDF8' } } }
+        },
+        plugins: [Chart.registry.getPlugin('annotation')]
+      });
+    }
+
+    function calculateRSI(closes, period = 14) {
+      let gains = 0, losses = 0;
+      const rsis = Array(period).fill(null);
+      for (let i = 1; i < closes.length; i++) {
+        const diff = closes[i] - closes[i - 1];
+        if (i < period) {
+          diff > 0 ? gains += diff : losses -= diff;
+          continue;
+        }
+        if (i === period) { gains /= period; losses /= period; }
+        else diff > 0 ? gains = (gains * (period - 1) + diff) / period : losses = (losses * (period - 1) - diff) / period;
+        const rs = gains / (losses || 1e-10);
+        rsis.push(+(100 - 100 / (1 + rs)).toFixed(2));
+      }
+      return rsis;
+    }
+
+    async function fetchCandlestick() {
+      try {
+        const symbol = document.getElementById('pairSelect').value;
+        const res = await axios.get(`${BASE_API_URL}/api/candle?symbol=${symbol}`);
+        const c = res.data?.candles?.[0];
+        if (!c || !c.time) throw new Error(`Invalid candle: ${JSON.stringify(c)}`);
+        const timestamp = Number(c.time);
+        if (!timestamp || isNaN(timestamp)) throw new Error(`Invalid timestamp: ${c.time}`);
+        const candle = { x: timestamp, o: +c.open, h: +c.high, l: +c.low, c: +c.close };
+        if ([candle.o, candle.h, candle.l, candle.c].some(isNaN)) throw new Error("Invalid OHLC values");
+        failCount = 0;
+        return candle;
+      } catch (err) {
+        console.error('Candle Error:', err.message);
+        failCount++;
+        if (failCount >= 5) {
+          logTrade("Too many failures. Auto trading stopped.");
+          toggleTrading();
+        }
+        return null;
+      }
+    }
+
+    function updateCharts(candle) {
+      if (!candle || isNaN(candle.x)) return;
+      const pData = candlestickChart.data.datasets[0].data;
+      const rData = rsiChart.data.datasets[0].data;
+      const rLabels = rsiChart.data.labels;
+      const last = pData[pData.length - 1];
+      last && last.x === candle.x ? pData[pData.length - 1] = candle : (pData.push(candle), pData.length > maxCandles && pData.shift());
+      const closes = pData.map(p => p.c);
+      const rsis = calculateRSI(closes);
+      const latestRSI = rsis[rsis.length - 1];
+      if (!isNaN(latestRSI)) {
+        if (rLabels.length === pData.length) rData[rData.length - 1] = latestRSI;
+        else {
+          rLabels.push(new Date(candle.x).toLocaleTimeString());
+          rData.push(latestRSI);
+          if (rData.length > maxCandles) { rData.shift(); rLabels.shift(); }
+        }
+      }
+      candlestickChart.update();
+      rsiChart.update();
+    }
+
+    async function fetchSignal() {
+      try {
+        const symbol = document.getElementById('pairSelect').value;
+        const res = await axios.post(`${BASE_API_URL}/api/strategy`, { symbol });
+        return res.data.signal;
+      } catch (err) {
+        console.error('Strategy Error:', err.message);
+        return 'hold';
+      }
+    }
+
+
+
+  /**  function executeTrade(action) {
+      const symbol = document.getElementById('pairSelect').value;
+      const qty = parseFloat(document.getElementById('qtyInput').value);
+      if (!qty || qty <= 0) return logTrade("Invalid quantity");
+      axios.post(`${BASE_API_URL}/api/trade`, { side: action.toUpperCase(), symbol, qty: qty.toString() })
+        .then(res => logTrade(`Trade Success: ${JSON.stringify(res.data)}`))
+        .catch(err => logTrade(`Trade Error: ${err.response?.data?.error || err.message}`));
+    }
+
+   /** function handleAutoTrade(signal, price, time) {
+      if (!activePosition) {
+        if (signal === 'Buy' || signal === 'sell') {
+          const tp = parseFloat(document.getElementById('tpInput').value);
+          const sl = parseFloat(document.getElementById('slInput').value);
+          const stopLoss = signal === 'Buy' ? price * (1 - sl / 100) : price * (1 + sl / 100);
+          const takeProfit = signal === 'Buy' ? price * (1 + tp / 100) : price * (1 - tp / 100);
+          activePosition = { type: signal, entry: price, stopLoss, takeProfit };
+          executeTrade(signal);
+          logTrade(`${time} | ${signal.toUpperCase()} @ $${price.toFixed(2)} | TP: $${takeProfit.toFixed(2)} | SL: $${stopLoss.toFixed(2)}`);
+        } else logTrade(`${time} | HOLD - No action taken.`);
+      } else {
+        const { type, stopLoss, takeProfit } = activePosition;
+        if ((type === 'Buy' && price >= takeProfit) || (type === 'sell' && price <= takeProfit)) {
+          executeTrade('sell');
+          logTrade(`${time} | TAKE PROFIT hit @ $${price.toFixed(2)} - Closed.`);
+          activePosition = null;
+        } else if ((type === 'Buy' && price <= stopLoss) || (type === 'sell' && price >= stopLoss)) {
+          executeTrade('sell');
+          logTrade(`${time} | STOP LOSS hit @ $${price.toFixed(2)} - Closed.`);
+          activePosition = null;
+        } else {
+          logTrade(`${time} | Active ${type.toUpperCase()} @ $${price.toFixed(2)} | TP: $${takeProfit.toFixed(2)} | SL: $${stopLoss.toFixed(2)}`);
+        }
+      }
+    }**/
+
+    function logTrade(msg) {
+      const log = document.getElementById('tradeLog');
+      const entry = document.createElement('div');
+      entry.textContent = msg;
+      log.appendChild(entry);
+      log.scrollTop = log.scrollHeight;
+    }
+async function updatePnL() {
+  try {
+    const res = await axios.get(`/api/pnl?symbol=ETHUSDT`);
+    const data = res.data;
+
+    const pnlDiv = document.getElementById("pnl");
+
+    if (!data.position) {
+      pnlDiv.innerHTML = `
+        <strong>${data.symbol}</strong><br>
+        No open position 🚫
+      `;
+      return;
+    }
+
+    pnlDiv.innerHTML = `
+      <strong>${data.symbol}</strong><br>
+      📈 Side: <b>${data.side}</b><br>
+      📦 Size: ${data.size}<br>
+      🎯 Entry Price: ${data.entryPrice}<br>
+      💹 Mark Price: ${data.markPrice}<br>
+      ⚡ Leverage: ${data.leverage}x<br>
+      💰 Unrealized PnL: <span style="color:${data.unrealizedPnl >= 0 ? 'lime' : 'red'}">
+        ${data.unrealizedPnl}
+      </span>
+    `;
+  } catch (err) {
+    console.error("PnL fetch error:", err.message);
+    document.getElementById("pnl").innerHTML = "⚠️ Error fetching PnL";
+  }
+}
+
+// refresh every 5 seconds
+setInterval(updatePnL, 5000);
+
+    function updateCharts(candle) {
+      if (!candle || isNaN(candle.x)) return;
+      const pData = candlestickChart.data.datasets[0].data;
+      const rData = rsiChart.data.datasets[0].data;
+      const rLabels = rsiChart.data.labels;
+      const last = pData[pData.length - 1];
+      last && last.x === candle.x ? pData[pData.length - 1] = candle : (pData.push(candle), pData.length > maxCandles && pData.shift());
+      const closes = pData.map(p => p.c);
+      const rsis = calculateRSI(closes);
+      const latestRSI = rsis[rsis.length - 1];
+      if (!isNaN(latestRSI)) {
+        if (rLabels.length === pData.length) rData[rData.length - 1] = latestRSI;
+        else {
+          rLabels.push(new Date(candle.x).toLocaleTimeString());
+          rData.push(latestRSI);
+          if (rData.length > maxCandles) { rData.shift(); rLabels.shift(); }
+        }
+      }
+      candlestickChart.update();
+      rsiChart.update();
+    }
+
+    function startTradingLoop() {
+      const interval = parseInt(document.getElementById('timeframeSelect').value);
+      clearInterval(tradingInterval);
+      tradingInterval = setInterval(async () => {
+        const candle = await fetchCandlestick();
+        if (!candle) return;
+        updateCharts(candle);
+        if (autoTrading) {
+          const externalSignal = await fetchSignal();
+ logTrade(`Signal: ${externalSignal.action}`);
+        }
+      }, interval);
+    }
+
+    function toggleTrading() {
+      autoTrading = !autoTrading;
+      document.getElementById('status').innerText = autoTrading ? 'Running' : 'Stopped';
+      document.querySelector('.control-panel button').innerText = autoTrading ? 'Stop Auto Trading' : 'Start Auto Trading';
+      if (autoTrading) startTradingLoop();
+      else {
+        clearInterval(tradingInterval);
+        activePosition = null;
+        failCount = 0;
+        candlestickChart.data.datasets[0].data = [];
+        rsiChart.data.labels = [];
+        rsiChart.data.datasets[0].data = [];
+        candlestickChart.update();
+        rsiChart.update();
+      }
+    }
+
+    initCharts();
+  </script>
+</body>
+</htML>
