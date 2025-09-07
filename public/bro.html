@@ -243,7 +243,7 @@ setInterval(fetchLogs, 2000);
       try {
         const symbol = document.getElementById('pairSelect').value;
         const res = await axios.post(`${BASE_API_URL}/api/strategy`, { symbol });
-        return res.data.signal;
+     return res.data.action;
       } catch (err) {
         console.error('Strategy Error:', err.message);
         return 'hold';
