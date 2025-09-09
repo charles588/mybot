@@ -359,10 +359,16 @@ setInterval(updatePnL, 5000);
         const candle = await fetchCandlestick();
         if (!candle) return;
         updateCharts(candle);
-        if (autoTrading) {
-          const externalSignal = await fetchSignal();
- logTrade(`Signal: ${externalSignal.action}`);
-        }
+if (autoTrading) {
+  const externalSignal = await fetchSignal();
+
+  // log the signal
+  logTrade(`Signal: ${externalSignal || "Hold"}`);
+
+  // update the "Last Signal" display in the card
+  document.getElementById("lastSignal").innerText = externalSignal || "Hold";
+}
+
       }, interval);
     }
 

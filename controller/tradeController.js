@@ -293,7 +293,7 @@ function calcVWAP(candles) {
   }
   return vol > 0 ? pv / vol : null;
 }
-async function getPnL(req, res) {
+/*async function getPnL(req, res) {
   try {
     const { symbol } = req.query; // e.g. BTCUSDT
     const response = await axios.get(`${BASE_URL}/v5/position/list`, {
@@ -318,7 +318,7 @@ async function getPnL(req, res) {
   }
 }
 
-module.exports = { getPnL };
+module.exports = { getPnL };*/
 
 // ===== ORDER BOOK IMBALANCE =====
 async function getOrderBookImbalance(symbol, depth = 20) {
@@ -347,82 +347,62 @@ async function getOrderBookImbalance(symbol, depth = 20) {
 async function generateSignal(candles, symbol) {
   if (candles.length < 30) return null;
 
-  // ---- EMA 9 and 21 ----
+  // === Global Filters ===
+  const atr = calcATR(candles, ATR_PERIOD);
+  if (atr < MIN_ATR_USDT) {
+    addTradeLog("⚠️ ATR too low, skipping trade");
+    return { action: "Hold" };
+  }
+
+  const chop = calcChoppinessIndex(candles, 14);
+  if (chop !== null && chop > 60) {
+    addTradeLog(`⚠️ Market too choppy (CHOP=${chop.toFixed(2)}), skipping trade.`);
+    return { action: "Hold" };
+  }
+
+  // === Indicators ===
   const closes = candles.map(c => parseFloat(c.close));
   const ema9 = emaSeries(closes, 9);
   const ema21 = emaSeries(closes, 21);
-
   const ema9Prev = ema9[ema9.length - 2];
   const ema21Prev = ema21[ema21.length - 2];
   const ema9Curr = ema9[ema9.length - 1];
   const ema21Curr = ema21[ema21.length - 1];
 
-  // ---- VWAP ----
   const vwap = calcVWAP(candles);
   const lastClose = closes[closes.length - 1];
+  const obi = await getOrderBookImbalance(symbol);
 
-  // ---- Order Book Imbalance ----
-  const obi = await getOrderBookImbalance(symbol); // -1 to +1
-
-  // ---- Volume Spike ----
+  // === Volume Spike ===
   const volumes = candles.map(c => parseFloat(c.volume));
   const lastVol = volumes[volumes.length - 1];
   const avgVol = volumes.slice(-6, -1).reduce((a, b) => a + b, 0) / 5;
-const volumeSpike = lastVol > avgVol * 0.8; 
-addTradeLog({
-  ema9Prev, ema21Prev, ema9Curr, ema21Curr,
-  lastClose, vwap,
-  obi,
-  lastVol, avgVol,
-  volumeSpike
-});
-  // === ENTRY CONDITIONS ===
-  // LONG
-  if (
-    ema9Prev < ema21Prev && ema9Curr > ema21Curr && // EMA cross up
-    lastClose > vwap && 
-    obi > 0.1 && // >55% buy pressure
-    volumeSpike
-  ) {
-    const tpPercent = randomRange(0.008, 0.015); // 0.2–0.4%
-    const slPercent = randomRange(0.004, 0.005); // 0.1–0.3%
+  const volumeSpike = lastVol > avgVol * 0.8;
 
+  // === Entry Logic ===
+  if (ema9Prev < ema21Prev && ema9Curr > ema21Curr && lastClose > vwap && obi > 0.1 && volumeSpike) {
     return {
       action: "Buy",
       entryPrice: lastClose,
-      stopLoss: lastClose * (1 - slPercent),
-      takeProfit: lastClose * (1 + tpPercent),
+      stopLoss: lastClose * 0.995,   // 0.5% SL
+      takeProfit: lastClose * 1.01,  // 1% TP
       confidence: 1 + obi
     };
   }
 
-  // SHORT
-  if (
-    ema9Prev > ema21Prev && ema9Curr < ema21Curr && // EMA cross down
-    lastClose < vwap && 
-    obi < -0.1 && // >55% sell pressure
-    volumeSpike
-  ) {
-    const tpPercent = randomRange(0.002, 0.004);
-    const slPercent = randomRange(0.001, 0.003);
-
+  if (ema9Prev > ema21Prev && ema9Curr < ema21Curr && lastClose < vwap && obi < -0.1 && volumeSpike) {
     return {
       action: "Sell",
       entryPrice: lastClose,
-      stopLoss: lastClose * (1 + slPercent),
-      takeProfit: lastClose * (1 - tpPercent),
+      stopLoss: lastClose * 1.005,   // 0.5% SL
+      takeProfit: lastClose * 0.99,  // 1% TP
       confidence: 1 - obi
     };
   }
-  const atr = calcATR(candles, ATR_PERIOD);
-if (atr < MIN_ATR_USDT) {
-  addTradeLog("⚠️ ATR too low, skipping trade");
-   return { action: "Hold" };
+
+  return { action: "Hold" };
 }
 
-
-   return { action: "Hold" };
-}
 // ===== ORDERING =====
 async function executeTrade({ side, symbol, qty, stopLoss, takeProfit }) {
   try {
@@ -589,6 +569,32 @@ async function getPositionQty(symbol) {
   return pos ? parseFloat(pos.size) : 0;
 }
 // ===== BOT LOOP =====
+function calcChoppinessIndex(candles, period = 14) {
+  if (candles.length < period * 2) return null;
+
+  const highs = candles.map(c => c.high);
+  const lows = candles.map(c => c.low);
+  const closes = candles.map(c => c.close);
+
+  // Calculate ATR
+  const atr = [];
+  for (let i = 1; i < candles.length; i++) {
+    const tr = Math.max(
+      highs[i] - lows[i],
+      Math.abs(highs[i] - closes[i - 1]),
+      Math.abs(lows[i] - closes[i - 1])
+    );
+    atr.push(tr);
+  }
+
+  const atrSum = atr.slice(-period).reduce((a, b) => a + b, 0);
+  const highMax = Math.max(...highs.slice(-period));
+  const lowMin = Math.min(...lows.slice(-period));
+
+  const ci = 100 * Math.log10(atrSum / (highMax - lowMin)) / Math.log10(period);
+  return ci;
+}
+
 
 async function runBot() {
     const symbol = SYMBOL; // ensures it's always available
@@ -727,6 +733,7 @@ async function getPositionInfo(symbol) {
     console.error("❌ getPositionInfo error:", err.response?.data || err.message);
     throw err;
   }
+  
 }
 
 async function closePosition(symbol) {
@@ -788,7 +795,7 @@ function startLoop() {
 (async () => {
   try {
     await setLeverage(SYMBOL, LEVERAGE_TO_USE);   // <-- leverage set once here
-  setInterval(runBot, 10 * 1000); // 10s         // <-- bot loop starts 
+  setInterval(runBot, 60 * 1000); // 10s         // <-- bot loop starts 
   } catch (err) {
     console.error("Error during startup:", err.message);
   }
